@@ -6,18 +6,19 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Greedy solver for Block Blast.
+ * Sequential solver for Block Blast.
  *
- * For each of the 3 available pieces, tries every valid (row, col) placement
- * on the 8×8 board and scores it.  Returns the best placement for each piece
- * (independent; not sequential — good enough for a helper overlay).
+ * Tries every ordering of the active pieces and every valid placement for
+ * each, tracking the board as it evolves (so combo clears across pieces are
+ * accounted for). Among sequences that place the most pieces, picks the one
+ * that clears the most lines in total; ties are broken by a "density" score
+ * that rewards keeping filled cells compact (fewer scattered single-cell
+ * holes).
  *
- * Score function penalises:
- *   - Holes (empty cells with a filled cell above them)
- *   - Max occupied row (board height)
- *   - Remaining empty cells after lines cleared
- * and rewards:
- *   - Lines (rows + cols) cleared
+ * This mirrors the search used in the original notebook / HTML solver tool,
+ * adapted to this project's board convention: board[r][c] == true means
+ * "occupied", and piece shapes are normalised to a flush top-left 5x5
+ * bounding box with (row, col) as the top-left placement corner.
  */
 public class BlockSolver {
 
@@ -27,8 +28,8 @@ public class BlockSolver {
         public int piece;   // 0-2
         public int row;     // top-left row on board
         public int col;     // top-left col on board
-        public double score;
-        public boolean[][] shape; // 5×5 canonical shape
+        public double score; // total lines cleared by the chosen sequence
+        public boolean[][] shape; // 5x5 canonical (flush top-left) shape
 
         public Placement(int piece, int row, int col, double score, boolean[][] shape) {
             this.piece = piece; this.row = row; this.col = col;
@@ -36,43 +37,128 @@ public class BlockSolver {
         }
     }
 
-    /**
-     * @param board   8×8 current board state
-     * @param pieces  3 × 5×5 piece shapes
-     * @return best Placement for each piece (null if piece has no valid moves)
-     */
-    public static Placement[] solve(boolean[][] board, boolean[][][] pieces) {
-        Placement[] best = new Placement[3];
-
-        for (int p = 0; p < 3; p++) {
-            boolean[][] shape = normalise(pieces[p]);
-            if (isEmpty(shape)) continue; // piece slot empty
-
-            double bestScore = Double.NEGATIVE_INFINITY;
-
-            for (int r = 0; r <= GRID - 1; r++) {
-                for (int c = 0; c <= GRID - 1; c++) {
-                    if (!canPlace(board, shape, r, c)) continue;
-
-                    boolean[][] next = place(board, shape, r, c);
-                    next = clearLines(next);
-                    double sc = score(next, board, shape, r, c);
-
-                    if (sc > bestScore) {
-                        bestScore = sc;
-                        best[p]   = new Placement(p, r, c, sc, shape);
-                    }
-                }
-            }
-        }
-        return best;
+    private static class Best {
+        List<int[]> moves; // each = {pieceIndex, row, col}
+        int clears = -1;
+        double density = -1;
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────
+    /**
+     * @param board   8x8 current board state (true = occupied)
+     * @param pieces  3 x 5x5 piece shapes
+     * @return best Placement for each piece slot (null if that piece isn't
+     *         part of the best sequence, e.g. when the board is too full to
+     *         place all 3)
+     */
+    public static Placement[] solve(boolean[][] board, boolean[][][] pieces) {
+        boolean[][][] shapes = new boolean[3][][];
+        List<Integer> active = new ArrayList<>();
+        for (int p = 0; p < 3; p++) {
+            shapes[p] = normalise(pieces[p]);
+            if (!isEmpty(shapes[p])) active.add(p);
+        }
+
+        Placement[] result = new Placement[3];
+        if (active.isEmpty()) return result;
+
+        // Try placing all active pieces, then fewer, until something fits.
+        for (int k = active.size(); k >= 1; k--) {
+            Best best = new Best();
+            for (List<Integer> combo : combinations(active, k)) {
+                for (List<Integer> seq : permutations(combo)) {
+                    search(seq, 0, board, new ArrayList<>(), 0, shapes, best);
+                }
+            }
+            if (best.moves != null) {
+                for (int[] mv : best.moves) {
+                    int p = mv[0];
+                    result[p] = new Placement(p, mv[1], mv[2], best.clears, shapes[p]);
+                }
+                return result;
+            }
+        }
+        return result;
+    }
+
+    /** Recursively tries placing seq.get(idx)... on `grid`, updating `best`. */
+    private static void search(List<Integer> seq, int idx, boolean[][] grid,
+                                List<int[]> moves, int clears,
+                                boolean[][][] shapes, Best best) {
+        if (idx == seq.size()) {
+            double d = density(grid);
+            if (best.moves == null || clears > best.clears
+                    || (clears == best.clears && d > best.density)) {
+                best.moves = new ArrayList<>(moves);
+                best.clears = clears;
+                best.density = d;
+            }
+            return;
+        }
+
+        int p = seq.get(idx);
+        boolean[][] shape = shapes[p];
+
+        for (int r = 0; r < GRID; r++) {
+            for (int c = 0; c < GRID; c++) {
+                if (!canPlace(grid, shape, r, c)) continue;
+
+                boolean[][] placed = place(grid, shape, r, c);
+                int newClears = countFullLines(placed);
+                boolean[][] next = clearLines(placed);
+
+                moves.add(new int[]{p, r, c});
+                search(seq, idx + 1, next, moves, clears + newClears, shapes, best);
+                moves.remove(moves.size() - 1);
+            }
+        }
+    }
+
+    // ── Permutations / combinations over small Integer lists ───────────────
+
+    private static List<List<Integer>> permutations(List<Integer> arr) {
+        List<List<Integer>> res = new ArrayList<>();
+        if (arr.size() <= 1) {
+            res.add(new ArrayList<>(arr));
+            return res;
+        }
+        for (int i = 0; i < arr.size(); i++) {
+            List<Integer> rest = new ArrayList<>(arr);
+            Integer cur = rest.remove(i);
+            for (List<Integer> p : permutations(rest)) {
+                List<Integer> combo = new ArrayList<>();
+                combo.add(cur);
+                combo.addAll(p);
+                res.add(combo);
+            }
+        }
+        return res;
+    }
+
+    private static List<List<Integer>> combinations(List<Integer> arr, int k) {
+        List<List<Integer>> res = new ArrayList<>();
+        if (k == 0) {
+            res.add(new ArrayList<>());
+            return res;
+        }
+        if (arr.size() < k) return res;
+
+        Integer first = arr.get(0);
+        List<Integer> rest = arr.subList(1, arr.size());
+
+        for (List<Integer> c : combinations(rest, k - 1)) {
+            List<Integer> withFirst = new ArrayList<>();
+            withFirst.add(first);
+            withFirst.addAll(c);
+            res.add(withFirst);
+        }
+        res.addAll(combinations(rest, k));
+        return res;
+    }
+
+    // ── Board / shape helpers ────────────────────────────────────────────
 
     /** Strip empty border rows/cols so shape is flush top-left. */
     private static boolean[][] normalise(boolean[][] raw) {
-        // find bounding box
         int minR = 5, maxR = -1, minC = 5, maxC = -1;
         for (int r = 0; r < 5; r++)
             for (int c = 0; c < 5; c++)
@@ -112,15 +198,14 @@ public class BlockSolver {
         return next;
     }
 
+    /** Returns a copy of b with any fully-occupied rows/cols cleared. */
     private static boolean[][] clearLines(boolean[][] b) {
         boolean[][] next = copy(b);
-        // Clear full rows
         for (int r = 0; r < GRID; r++) {
             boolean full = true;
             for (int c = 0; c < GRID; c++) if (!next[r][c]) { full = false; break; }
             if (full) for (int c = 0; c < GRID; c++) next[r][c] = false;
         }
-        // Clear full cols
         for (int c = 0; c < GRID; c++) {
             boolean full = true;
             for (int r = 0; r < GRID; r++) if (!next[r][c]) { full = false; break; }
@@ -129,25 +214,7 @@ public class BlockSolver {
         return next;
     }
 
-    private static double score(boolean[][] after, boolean[][] before,
-                                boolean[][] shape, int tr, int tc) {
-        // Count lines cleared
-        int linesBefore = countFullLines(before);
-        // Temporarily place then clear
-        boolean[][] placed = place(before, shape, tr, tc);
-        int linesAfter  = countFullLines(placed);
-        int cleared     = linesAfter - linesBefore; // rows+cols newly cleared
-
-        int holes   = countHoles(after);
-        int height  = maxHeight(after);
-        int filled  = countFilled(after);
-
-        return cleared * 10.0
-                - holes   * 3.0
-                - height  * 0.5
-                - filled  * 0.1;
-    }
-
+    /** Counts how many rows + columns in b are currently fully occupied. */
     private static int countFullLines(boolean[][] b) {
         int n = 0;
         for (int r = 0; r < GRID; r++) {
@@ -163,29 +230,25 @@ public class BlockSolver {
         return n;
     }
 
-    private static int countHoles(boolean[][] b) {
-        int holes = 0;
-        for (int c = 0; c < GRID; c++) {
-            boolean seenFilled = false;
-            for (int r = 0; r < GRID; r++) {
-                if (b[r][c]) seenFilled = true;
-                else if (seenFilled) holes++;
+    /**
+     * Higher = filled cells are more clustered together (fewer scattered
+     * single-cell holes). For each occupied cell, scores the fraction of its
+     * in-bounds neighbours that are also occupied, summed over the board.
+     */
+    private static double density(boolean[][] b) {
+        double score = 0;
+        for (int i = 0; i < GRID; i++) {
+            for (int j = 0; j < GRID; j++) {
+                if (!b[i][j]) continue;
+                int filledN = 0, total = 0;
+                if (i > 0)        { total++; if (b[i - 1][j]) filledN++; }
+                if (i < GRID - 1) { total++; if (b[i + 1][j]) filledN++; }
+                if (j > 0)        { total++; if (b[i][j - 1]) filledN++; }
+                if (j < GRID - 1) { total++; if (b[i][j + 1]) filledN++; }
+                if (total > 0) score += (double) filledN / total;
             }
         }
-        return holes;
-    }
-
-    private static int maxHeight(boolean[][] b) {
-        for (int r = 0; r < GRID; r++)
-            for (int c = 0; c < GRID; c++)
-                if (b[r][c]) return GRID - r;
-        return 0;
-    }
-
-    private static int countFilled(boolean[][] b) {
-        int n = 0;
-        for (boolean[] row : b) for (boolean v : row) if (v) n++;
-        return n;
+        return score;
     }
 
     private static boolean[][] copy(boolean[][] src) {
