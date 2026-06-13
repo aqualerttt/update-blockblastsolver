@@ -1,0 +1,47 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.blockblast.solver'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.blockblast.solver"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.core:core:1.12.0'
+    
+    // Forces the project to use a single unified Kotlin library
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.8.22"
+}
+
+// This tells Gradle to completely replace old jdk7/jdk8 modules with the clean unified library
+configurations.all {
+    resolutionStrategy {
+        eachDependency { DependencyResolveDetails details ->
+            if (details.requested.group == 'org.jetbrains.kotlin' && 
+               (details.requested.name == 'kotlin-stdlib-jdk7' || details.requested.name == 'kotlin-stdlib-jdk8')) {
+                details.useTarget "org.jetbrains.kotlin:kotlin-stdlib:1.8.22"
+            }
+        }
+    }
+}
